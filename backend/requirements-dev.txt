@@ -1,0 +1,20 @@
+# Development requirements
+# Install with: pip install -r requirements-dev.txt
+
+# First install main requirements
+-r requirements.txt
+
+# Development Tools
+ipython==8.31.0
+ipykernel==6.29.5
+
+# Testing
+pytest==7.4.3
+pytest-django==4.7.0
+pluggy==1.6.0
+iniconfig==2.3.0
+
+# Code Quality
+black
+flake8
+isort

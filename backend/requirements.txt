@@ -1,0 +1,91 @@
+# Core Django
+Django==5.2.8
+djangorestframework==3.14.0
+django-cors-headers==4.3.1
+django-environ==0.11.2
+
+# Database
+psycopg2-binary==2.9.9
+
+# WSGI Server
+gunicorn==21.2.0
+
+# AI/ML - LangChain
+langchain==0.3.18
+langchain-openai==0.2.13
+langchain-groq==0.2.5
+langchain-community==0.3.17
+sentence-transformers
+langchain-core>=0.3.34
+langchain-text-splitters==0.3.6
+
+# AI/ML - OpenAI
+openai==1.59.9
+tiktoken==0.8.0
+
+# Deep Learning (CPU-only versions)
+# Note: Install PyTorch separately with: pip install torch==2.2.0+cpu torchvision==0.17.0+cpu --index-url https://download.pytorch.org/whl/cpu
+torch==2.2.0
+torchvision==0.17.0
+transformers==4.48.1
+huggingface-hub==0.36.0
+tensorflow-cpu==2.15.0
+tensorflow-estimator==2.15.0
+
+# NLP
+scikit-learn==1.7.1
+
+# Data Processing
+pandas==2.3.1
+numpy>=1.26.2
+joblib==1.5.1
+
+# Utilities
+python-dotenv==1.2.1
+python-dateutil==2.9.0.post0
+
+# API & Authentication
+djangorestframework-simplejwt==5.3.1
+drf-yasg==1.21.7
+PyJWT==2.10.1
+
+# Async Tasks
+celery==5.3.4
+redis==5.0.1
+kombu==5.6.1
+vine==5.1.0
+amqp==5.3.1
+
+# Development Tools (Optional) - moved to requirements-dev.txt
+# ipython, ipykernel, pytest should be in dev dependencies
+
+# Additional Utilities
+requests==2.32.5
+urllib3==2.5.0
+certifi==2025.11.12
+charset-normalizer==3.4.4
+idna==3.11
+
+# Development Tools (Optional) - moved to requirements-dev.txt
+# ipython, ipykernel, pytest should be in dev dependencies
+
+# Monitoring & Logging
+loguru==0.7.3
+colorlog==6.9.0
+
+# File System Watching (for Celery auto-restart)
+watchdog==4.0.0
+# Vector database
+faiss-cpu==1.7.4
+
+# Multi-modal RAG Pipeline
+PyMuPDF>=1.23.0
+pdfplumber>=0.10.0
+Pillow>=10.0.0
+open-clip-torch>=2.24.0
+
+# LangGraph for agents (0.3.x is compatible with langchain-core 0.3.x)
+langgraph>=0.3.0
+
+# LangChain HuggingFace embeddings
+langchain-huggingface>=0.1.0
