@@ -57,7 +57,7 @@ services:
       - REDIS_URL=redis://redis:6379/0
       - PYTHONUNBUFFERED=1
       - TF_USE_LEGACY_KERAS=0
-      - GROQ_API_KEY=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
+      - GROQ_API_KEY={GROQ_API_KEY}
     depends_on:
       db:
         condition: service_healthy
