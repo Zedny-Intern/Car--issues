@@ -2,7 +2,7 @@
 Serializers for Car model.
 """
 from rest_framework import serializers
-from .models import Car
+from .models import Car, validate_car_mileage, validate_car_year
 from apps.customers.serializers import CustomerSerializer
 
 
@@ -41,18 +41,28 @@ class CarSerializer(serializers.ModelSerializer):
 
     def validate_year(self, value):
         """Validate car year."""
-        from django.utils import timezone
-        current_year = timezone.now().year
-        if value < 1900 or value > current_year + 1:
-            raise serializers.ValidationError(
-                f"Year must be between 1900 and {current_year + 1}"
-            )
+        validate_car_year(value)
+        return value
+
+    def validate_mileage(self, value):
+        """Validate mileage against DB-supported bounds."""
+        validate_car_mileage(value)
         return value
 
     def validate_license_plate(self, value):
         """Validate license plate format and uniqueness."""
         # Remove spaces and convert to uppercase for consistency
         value = value.replace(' ', '').upper()
+        return value
+
+    def validate_year(self, value):
+        """Validate car year."""
+        validate_car_year(value)
+        return value
+
+    def validate_mileage(self, value):
+        """Validate mileage against DB-supported bounds."""
+        validate_car_mileage(value)
         return value
 
 

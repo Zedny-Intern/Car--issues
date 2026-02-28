@@ -3,6 +3,11 @@ Serializers for Chat models.
 """
 from rest_framework import serializers
 from .models import ChatSession, ChatMessage, MessageRole
+from .bootstrap import (
+    dispatch_prepare_chat_session,
+    ensure_active_session_for_complaint,
+    ensure_placeholder_greeting,
+)
 from apps.complaints.serializers import ComplaintSerializer
 
 
@@ -106,40 +111,18 @@ class ChatSessionCreateSerializer(serializers.ModelSerializer):
 
     def create(self, validated_data):
         """
-        Create session and generate initial greeting using enhanced LangChain service.
+        Create or reuse the active session and return immediately with a placeholder greeting.
+        The full runtime and AI greeting are prepared in the background.
         """
-        from apps.ml_models.langchain_service import get_mechanic_service
-        import logging
-
-        logger = logging.getLogger(__name__)
-
-        # Create the session
-        session = ChatSession.objects.create(**validated_data)
-
-        try:
-            # Generate initial greeting from AI using enhanced service
-            mechanic_service = get_mechanic_service()
-            greeting = mechanic_service.generate_initial_greeting(
-                chat_session=session  # Pass the entire session for full context
-            )
-
-            # Save greeting as first message
-            ChatMessage.objects.create(
-                session=session,
-                role=MessageRole.ASSISTANT,
-                message=greeting
-            )
-
-            logger.info(f"Successfully created chat session {session.id} with AI greeting")
-
-        except Exception as e:
-            logger.error(f"Error generating initial greeting: {e}", exc_info=True)
-            # Save fallback greeting
-            ChatMessage.objects.create(
-                session=session,
-                role=MessageRole.ASSISTANT,
-                message=f"Hello! I'm your AI mechanic assistant. I'm here to help with your {session.car.display_name}. How can I assist you today?"
-            )
+        complaint = validated_data['complaint']
+        title = validated_data.get('title', '')
+        session, _ = ensure_active_session_for_complaint(complaint, title=title)
+        ensure_placeholder_greeting(session)
+        dispatch_prepare_chat_session(
+            complaint_id=complaint.id,
+            sync_documents=True,
+            source='chat-session-create',
+        )
 
         return session
 

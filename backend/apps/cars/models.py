@@ -7,6 +7,8 @@ from django.core.exceptions import ValidationError
 from django.utils import timezone
 from apps.customers.models import Customer
 
+POSTGRES_INT_MAX = 2147483647
+
 
 def validate_car_year(value):
     """
@@ -19,6 +21,20 @@ def validate_car_year(value):
         raise ValidationError(f"Car year cannot be in the future (max: {current_year + 1}).")
     if value < 1900:
         raise ValidationError("Car year must be 1900 or later.")
+
+
+def validate_car_mileage(value):
+    """
+    Validate mileage so it fits both business expectations and DB limits.
+    """
+    if value is None:
+        return
+    if value < 0:
+        raise ValidationError("Car mileage cannot be negative.")
+    if value > POSTGRES_INT_MAX:
+        raise ValidationError(
+            f"Car mileage is too large. Maximum supported value is {POSTGRES_INT_MAX:,} km."
+        )
 
 
 class Car(models.Model):
@@ -89,6 +105,7 @@ class Car(models.Model):
 
     mileage = models.IntegerField(
         default=0,
+        validators=[validate_car_mileage],
         help_text="Current mileage in kilometers"
     )
 

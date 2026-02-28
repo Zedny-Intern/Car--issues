@@ -1,43 +1,39 @@
-# Backend Dockerfile for Django Car Diagnosis System
-
 FROM python:3.11-slim
 
-# Set environment variables
+ARG INSTALL_LOCAL_ML=false
+ARG INSTALL_OPTIONAL_LLM_FALLBACKS=false
+
 ENV PYTHONUNBUFFERED=1 \
     PYTHONDONTWRITEBYTECODE=1 \
     PIP_NO_CACHE_DIR=1 \
-    PIP_DISABLE_PIP_VERSION_CHECK=1
+    PIP_DISABLE_PIP_VERSION_CHECK=1 \
+    PIP_ROOT_USER_ACTION=ignore \
+    PATH="/opt/venv/bin:$PATH"
 
-# Set work directory
 WORKDIR /app
 
-# Install system dependencies
-RUN apt-get update && apt-get install -y \
-    postgresql-client \
-    gcc \
-    python3-dev \
-    musl-dev \
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    libgomp1 \
     && rm -rf /var/lib/apt/lists/*
 
-# Copy requirements file
-COPY requirements.txt ./
+RUN python -m venv /opt/venv
 
-# Install Python dependencies
+COPY requirements-runtime.txt requirements-optional-llm.txt requirements-local-ml.txt ./
+
 RUN pip install --upgrade pip && \
-    pip install -r requirements.txt
+    pip install --prefer-binary -r requirements-runtime.txt && \
+    if [ "$INSTALL_OPTIONAL_LLM_FALLBACKS" = "true" ]; then pip install --prefer-binary -r requirements-optional-llm.txt; fi && \
+    if [ "$INSTALL_LOCAL_ML" = "true" ]; then pip install --prefer-binary -r requirements-local-ml.txt; fi
 
-
-# Copy project
 COPY . .
 
-# Create necessary directories
-RUN mkdir -p /app/staticfiles /app/media /app/logs /app/ml_models
+RUN mkdir -p /app/staticfiles /app/media /app/logs /app/ml_models && \
+    adduser --disabled-password --gecos "" appuser && \
+    chmod +x /app/docker-entrypoint.sh && \
+    chown -R appuser:appuser /app
 
-# Collect static files (will be overridden in docker-compose command)
-# RUN python manage.py collectstatic --noinput
+USER appuser
 
-# Expose port
 EXPOSE 8000
 
-# Run migrations and start server
 CMD ["sh", "-c", "python manage.py migrate && python manage.py collectstatic --noinput && gunicorn car_diagnosis_system.wsgi:application --bind 0.0.0.0:8000 --workers 4"]

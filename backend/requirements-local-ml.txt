@@ -1,0 +1,9 @@
+# Optional local ML stack.
+# Docker can skip this file by setting INSTALL_LOCAL_ML=false.
+langchain-huggingface>=0.1.0
+sentence-transformers==3.4.1
+torch==2.2.0
+numpy>=1.26.2
+joblib==1.5.1
+transformers==4.48.1
+tensorflow-cpu==2.15.0

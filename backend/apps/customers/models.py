@@ -3,7 +3,7 @@ Customer model for storing customer information.
 Each customer can have multiple cars and complaints.
 """
 from django.db import models
-from django.core.validators import RegexValidator, MinLengthValidator
+from django.core.validators import RegexValidator
 from django.core.exceptions import ValidationError
 
 

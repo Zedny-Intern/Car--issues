@@ -4,8 +4,8 @@ Views for Customer management API.
 from rest_framework import viewsets, filters, status
 from rest_framework.decorators import action
 from rest_framework.response import Response
-from rest_framework.permissions import AllowAny
-from django.db.models import Q
+from rest_framework.permissions import AllowAny, IsAuthenticated
+from django.conf import settings
 from .models import Customer
 from .serializers import (
     CustomerSerializer,
@@ -27,7 +27,7 @@ class CustomerViewSet(viewsets.ModelViewSet):
     - GET /api/v1/customers/{id}/complaint_history/ - Get all complaints for customer
     """
     queryset = Customer.objects.all()
-    permission_classes = [AllowAny]  # Change to IsAuthenticated in production
+    permission_classes = [AllowAny] if settings.DEBUG else [IsAuthenticated]
     filter_backends = [filters.SearchFilter, filters.OrderingFilter]
     search_fields = ['name', 'email', 'phone']
     ordering_fields = ['created_at', 'name']

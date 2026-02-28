@@ -1,11 +1,15 @@
 """
 Views for Complaint management API.
 """
+import logging
+from pathlib import Path
 from rest_framework import viewsets, filters, status
 from rest_framework.decorators import action, api_view, permission_classes
 from rest_framework.response import Response
-from rest_framework.permissions import AllowAny
+from rest_framework.permissions import AllowAny, IsAuthenticated
+from rest_framework.exceptions import ValidationError as DRFValidationError
 from django.db.models import Q, Count
+from django.conf import settings
 from rest_framework.parsers import MultiPartParser, FormParser
 from .models import Complaint, ComplaintCategory, ComplaintDocument
 from .serializers import (
@@ -15,6 +19,8 @@ from .serializers import (
     QuickComplaintSubmitSerializer,
     ComplaintDocumentSerializer
 )
+
+logger = logging.getLogger(__name__)
 
 
 class ComplaintViewSet(viewsets.ModelViewSet):
@@ -30,11 +36,20 @@ class ComplaintViewSet(viewsets.ModelViewSet):
     - GET /api/v1/complaints/statistics/ - Get complaint statistics
     """
     queryset = Complaint.objects.select_related('car', 'car__customer').all()
-    permission_classes = [AllowAny]  # Change to IsAuthenticated in production
+    permission_classes = [AllowAny] if settings.DEBUG else [IsAuthenticated]
+    public_actions = {'upload_document'}
     filter_backends = [filters.SearchFilter, filters.OrderingFilter]
     search_fields = ['complaint_text', 'car__license_plate', 'car__customer__name']
     ordering_fields = ['created_at', 'prediction_confidence']
     ordering = ['-created_at']
+
+    def get_permissions(self):
+        if settings.DEBUG or (
+            getattr(settings, 'PUBLIC_FRONTEND_API_ENABLED', True)
+            and self.action in self.public_actions
+        ):
+            return [AllowAny()]
+        return [permission() for permission in self.permission_classes]
 
     def get_serializer_class(self):
         """Return appropriate serializer based on action."""
@@ -121,6 +136,8 @@ class ComplaintViewSet(viewsets.ModelViewSet):
             }
             for choice in ComplaintCategory.choices
         ]
+        return Response({'categories': categories})
+
     @action(detail=True, methods=['post'], parser_classes=[MultiPartParser, FormParser])
     def upload_document(self, request, pk=None):
         """
@@ -128,64 +145,118 @@ class ComplaintViewSet(viewsets.ModelViewSet):
         """
         complaint = self.get_object()
         file_obj = request.FILES.get('file')
+        from apps.ml_models.document_loader import document_loader
+        allowed_extensions = {ext.lstrip('.') for ext in document_loader.SUPPORTED_DOCUMENT_EXTENSIONS}
+        allowed_content_types = {
+            'pdf': {'application/pdf'},
+            'txt': {'text/plain'},
+            'md': {'text/markdown', 'text/x-markdown', 'text/plain'},
+            'png': {'image/png'},
+            'jpg': {'image/jpeg'},
+            'jpeg': {'image/jpeg'},
+            'webp': {'image/webp'},
+            'gif': {'image/gif'},
+            'bmp': {'image/bmp'},
+        }
+        max_size_bytes = 10 * 1024 * 1024
         
         if not file_obj:
             return Response(
                 {'error': 'No file provided'},
                 status=status.HTTP_400_BAD_REQUEST
             )
+        clean_file_name = Path(file_obj.name).name
+        extension = Path(clean_file_name).suffix.lower().lstrip('.')
+        if extension not in allowed_extensions:
+            return Response(
+                {'error': f'Unsupported file type: .{extension}'},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+        uploaded_content_type = (file_obj.content_type or '').lower()
+        expected_types = allowed_content_types.get(extension, set())
+        if uploaded_content_type and expected_types and uploaded_content_type not in expected_types:
+            return Response(
+                {'error': f'Invalid content type for .{extension}: {uploaded_content_type}'},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+        if file_obj.size > max_size_bytes:
+            return Response(
+                {'error': f'File exceeds maximum size of {max_size_bytes // (1024 * 1024)}MB'},
+                status=status.HTTP_400_BAD_REQUEST
+            )
             
         try:
+            from apps.chat.bootstrap import dispatch_prepare_chat_session
+
             # 1. Save document to DB
             doc = ComplaintDocument.objects.create(
                 complaint=complaint,
                 file=file_obj,
-                file_name=file_obj.name,
-                file_type=file_obj.name.split('.')[-1].lower() if '.' in file_obj.name else 'unknown'
+                file_name=clean_file_name,
+                file_type=extension if extension else 'unknown'
             )
             
             # 2. Process with RAG DocumentLoader
-            from apps.ml_models.document_loader import document_loader
-            
             # Get full path to the saved file
             import os
             from django.conf import settings
             file_path = os.path.join(settings.MEDIA_ROOT, doc.file.name)
-            
-            # Index it
+
+            use_async = request.query_params.get('async', 'true').lower() == 'true'
+            if use_async:
+                from apps.ml_models.tasks import process_uploaded_document
+                task = process_uploaded_document.delay(
+                    file_path=file_path,
+                    force=True,
+                    complaint_document_id=doc.id,
+                )
+                return Response({
+                    'success': True,
+                    'message': 'Document uploaded. Indexing started in background.',
+                    'task_id': task.id,
+                    'data': ComplaintDocumentSerializer(doc).data
+                }, status=status.HTTP_202_ACCEPTED)
+
+            # Sync fallback (explicit async=false)
             result = document_loader.process_file(file_path, force=True)
-            
+
             if result.get('success'):
                 doc.is_analyzed = True
-                doc.save()
+                doc.save(update_fields=['is_analyzed'])
+                dispatch_prepare_chat_session(
+                    complaint_id=complaint.id,
+                    sync_documents=False,
+                    source='complaint-upload-sync',
+                )
                 return Response({
                     'success': True,
                     'message': 'Document uploaded and indexed successfully',
                     'data': ComplaintDocumentSerializer(doc).data,
                     'rag_result': result
                 })
-            else:
-                doc.analysis_error = result.get('error', 'Unknown error')
-                doc.save()
-                return Response({
-                    'success': False,
-                    'message': 'Document uploaded but indexing failed',
-                    'error': result.get('error'),
-                    'data': ComplaintDocumentSerializer(doc).data
-                }, status=status.HTTP_202_ACCEPTED) # Accepted but processing failed
+
+            doc.analysis_error = result.get('error', 'Unknown error')
+            doc.save(update_fields=['analysis_error'])
+            return Response({
+                'success': False,
+                'message': 'Document uploaded but indexing failed',
+                'error': result.get('error'),
+                'data': ComplaintDocumentSerializer(doc).data
+            }, status=status.HTTP_202_ACCEPTED)
                 
-        except Exception as e:
+        except Exception:
+            logger.exception("Unexpected error while uploading complaint document")
             return Response(
-                {'error': str(e)},
+                {'error': 'Unexpected server error while processing the document.'},
                 status=status.HTTP_500_INTERNAL_SERVER_ERROR
             )
 
-
-from django.views.decorators.csrf import csrf_exempt
-
 @api_view(['POST'])
-@permission_classes([AllowAny])
-@csrf_exempt
+@permission_classes(
+    [AllowAny]
+    if settings.DEBUG or getattr(settings, 'PUBLIC_FRONTEND_API_ENABLED', True)
+    else [IsAuthenticated]
+)
 def quick_submit_complaint(request):
     """
     Quick complaint submission endpoint.
@@ -211,7 +282,13 @@ def quick_submit_complaint(request):
     serializer = QuickComplaintSubmitSerializer(data=request.data)
 
     if serializer.is_valid():
-        result = serializer.save()
+        try:
+            result = serializer.save()
+        except DRFValidationError as exc:
+            return Response({
+                'success': False,
+                'errors': exc.detail
+            }, status=status.HTTP_400_BAD_REQUEST)
 
         from apps.customers.serializers import CustomerSerializer
         from apps.cars.serializers import CarSerializer

@@ -11,8 +11,28 @@ from rest_framework import viewsets, status
 from rest_framework.decorators import action
 from rest_framework.response import Response
 from rest_framework.parsers import MultiPartParser, FormParser
+from rest_framework.permissions import AllowAny, IsAuthenticated
+from uuid import uuid4
 
 logger = logging.getLogger(__name__)
+
+
+def _parse_top_k(raw_value, default=5, min_value=1, max_value=20):
+    """
+    Parse and clamp top_k-style integer inputs used by retrieval endpoints.
+    """
+    if raw_value in (None, ''):
+        return default
+
+    try:
+        parsed = int(raw_value)
+    except (TypeError, ValueError) as exc:
+        raise ValueError("top_k must be an integer.") from exc
+
+    if parsed < min_value or parsed > max_value:
+        raise ValueError(f"top_k must be between {min_value} and {max_value}.")
+
+    return parsed
 
 
 class DocumentViewSet(viewsets.ViewSet):
@@ -28,6 +48,16 @@ class DocumentViewSet(viewsets.ViewSet):
     - GET  /api/documents/stats/          Get indexing statistics
     """
     parser_classes = (MultiPartParser, FormParser)
+    permission_classes = [AllowAny] if settings.DEBUG else [IsAuthenticated]
+    public_actions = {'list', 'retrieve', 'upload', 'stats'}
+
+    def get_permissions(self):
+        if settings.DEBUG or (
+            getattr(settings, 'PUBLIC_FRONTEND_API_ENABLED', True)
+            and self.action in self.public_actions
+        ):
+            return [AllowAny()]
+        return [permission() for permission in self.permission_classes]
     
     def list(self, request):
         """List all indexed documents."""
@@ -54,7 +84,7 @@ class DocumentViewSet(viewsets.ViewSet):
     
     def retrieve(self, request, pk=None):
         """Get document details including chunks."""
-        from apps.ml_models.models import DocumentMetadata, DocumentChunk
+        from apps.ml_models.models import DocumentMetadata
         
         try:
             doc = DocumentMetadata.objects.get(pk=pk)
@@ -99,7 +129,7 @@ class DocumentViewSet(viewsets.ViewSet):
             file_hash = doc.file_hash
             
             # Delete from vector store
-            multimodal_vector_store.delete_by_file_hash(file_hash[:8])
+            multimodal_vector_store.delete_by_file_hash(file_hash)
             
             # Delete from database
             doc.delete()
@@ -123,20 +153,47 @@ class DocumentViewSet(viewsets.ViewSet):
             )
         
         uploaded_file = request.FILES['file']
+        safe_name = Path(uploaded_file.name).name
+        max_size_bytes = 10 * 1024 * 1024
+        if uploaded_file.size > max_size_bytes:
+            return Response(
+                {'error': f'File exceeds maximum size of {max_size_bytes // (1024 * 1024)}MB'},
+                status=status.HTTP_400_BAD_REQUEST
+            )
         
         # Validate file type
-        file_ext = Path(uploaded_file.name).suffix.lower()
-        supported = document_loader.SUPPORTED_PDF_EXTENSIONS | document_loader.SUPPORTED_IMAGE_EXTENSIONS
+        file_ext = Path(safe_name).suffix.lower()
+        supported = document_loader.SUPPORTED_DOCUMENT_EXTENSIONS
+        content_type = (uploaded_file.content_type or '').lower()
+        allowed_content_types = {
+            '.pdf': {'application/pdf'},
+            '.txt': {'text/plain'},
+            '.md': {'text/markdown', 'text/x-markdown', 'text/plain'},
+            '.png': {'image/png'},
+            '.jpg': {'image/jpeg'},
+            '.jpeg': {'image/jpeg'},
+            '.webp': {'image/webp'},
+            '.gif': {'image/gif'},
+            '.bmp': {'image/bmp'},
+        }
         
         if file_ext not in supported:
             return Response(
                 {'error': f'Unsupported file type: {file_ext}'},
                 status=status.HTTP_400_BAD_REQUEST
             )
+        expected_types = allowed_content_types.get(file_ext, set())
+        if content_type and expected_types and content_type not in expected_types:
+            return Response(
+                {'error': f'Invalid content type for {file_ext}: {content_type}'},
+                status=status.HTTP_400_BAD_REQUEST
+            )
         
         # Save to uploads directory
         uploads_dir = document_loader.uploads_dir
-        file_path = os.path.join(uploads_dir, uploaded_file.name)
+        os.makedirs(uploads_dir, exist_ok=True)
+        unique_name = f"{uuid4().hex}_{safe_name}"
+        file_path = os.path.join(uploads_dir, unique_name)
         
         with open(file_path, 'wb+') as destination:
             for chunk in uploaded_file.chunks():
@@ -156,6 +213,9 @@ class DocumentViewSet(viewsets.ViewSet):
         else:
             result = document_loader.process_file(file_path)
             if result.get('success'):
+                from apps.ml_models.tasks import dispatch_prime_rag_runtime
+
+                dispatch_prime_rag_runtime(force=False, cleanup_missing=False)
                 return Response({
                     'message': 'Document uploaded and indexed',
                     'result': result
@@ -181,9 +241,11 @@ class DocumentViewSet(viewsets.ViewSet):
         else:
             from apps.ml_models.document_loader import document_loader
             from apps.ml_models.multimodal_vector_store import multimodal_vector_store
+            from apps.ml_models.tasks import dispatch_prime_rag_runtime
             
             multimodal_vector_store.reset()
-            result = document_loader.index_all_documents(force=True)
+            result = document_loader.sync_all_documents(force=True, cleanup_missing=True)
+            dispatch_prime_rag_runtime(force=False, cleanup_missing=False)
             
             return Response({
                 'message': 'Reindex complete',
@@ -208,6 +270,16 @@ class RAGQueryViewSet(viewsets.ViewSet):
     - POST /api/rag/search/          Search without LLM response
     """
     parser_classes = (MultiPartParser, FormParser)
+    permission_classes = [AllowAny] if settings.DEBUG else [IsAuthenticated]
+    public_actions = {'query', 'search', 'status'}
+
+    def get_permissions(self):
+        if settings.DEBUG or (
+            getattr(settings, 'PUBLIC_FRONTEND_API_ENABLED', True)
+            and self.action in self.public_actions
+        ):
+            return [AllowAny()]
+        return [permission() for permission in self.permission_classes]
     
     @action(detail=False, methods=['post'])
     def query(self, request):
@@ -228,7 +300,10 @@ class RAGQueryViewSet(viewsets.ViewSet):
                 status=status.HTTP_400_BAD_REQUEST
             )
         
-        top_k = int(request.data.get('top_k', 5))
+        try:
+            top_k = _parse_top_k(request.data.get('top_k', 5), default=5)
+        except ValueError as exc:
+            return Response({'error': str(exc)}, status=status.HTTP_400_BAD_REQUEST)
         use_llm = request.data.get('use_llm', 'true').lower() == 'true'
         
         # Perform query
@@ -255,7 +330,10 @@ class RAGQueryViewSet(viewsets.ViewSet):
                 status=status.HTTP_400_BAD_REQUEST
             )
         
-        top_k = int(request.data.get('top_k', 10))
+        try:
+            top_k = _parse_top_k(request.data.get('top_k', 10), default=10)
+        except ValueError as exc:
+            return Response({'error': str(exc)}, status=status.HTTP_400_BAD_REQUEST)
         
         result = multimodal_rag_agent.retrieve(
             query=query_text,
@@ -274,18 +352,35 @@ class RAGQueryViewSet(viewsets.ViewSet):
 
 class ImageViewSet(viewsets.ViewSet):
     """Serve extracted images."""
+    permission_classes = [AllowAny] if settings.DEBUG else [IsAuthenticated]
+
+    def get_permissions(self):
+        if settings.DEBUG or getattr(settings, 'PUBLIC_FRONTEND_API_ENABLED', True):
+            return [AllowAny()]
+        return [permission() for permission in self.permission_classes]
     
     @action(detail=False, methods=['get'], url_path='(?P<filename>.+)')
     def serve(self, request, filename=None):
         """Serve an extracted image file."""
-        from apps.ml_models.document_loader import document_loader
+        if not filename:
+            return Response(
+                {'error': 'Image not found'},
+                status=status.HTTP_404_NOT_FOUND
+            )
+
+        safe_filename = Path(filename).name
+        if safe_filename != filename:
+            return Response(
+                {'error': 'Invalid image path'},
+                status=status.HTTP_400_BAD_REQUEST
+            )
         
         extracted_dir = str(getattr(
             settings, 'RAG_EXTRACTED_IMAGES_DIR',
             Path(settings.BASE_DIR).parent / 'data' / 'extracted_images'
         ))
         
-        file_path = os.path.join(extracted_dir, filename)
+        file_path = os.path.join(extracted_dir, safe_filename)
         
         if not os.path.exists(file_path):
             return Response(

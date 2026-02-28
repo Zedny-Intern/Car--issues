@@ -4,7 +4,8 @@ Views for Car management API.
 from rest_framework import viewsets, filters, status
 from rest_framework.decorators import action
 from rest_framework.response import Response
-from rest_framework.permissions import AllowAny
+from rest_framework.permissions import AllowAny, IsAuthenticated
+from django.conf import settings
 from .models import Car
 from .serializers import (
     CarSerializer,
@@ -27,11 +28,20 @@ class CarViewSet(viewsets.ModelViewSet):
     - GET /api/v1/cars/{id}/full_history_text/ - Get formatted history for LLM
     """
     queryset = Car.objects.select_related('customer').all()
-    permission_classes = [AllowAny]  # Change to IsAuthenticated in production
+    permission_classes = [AllowAny] if settings.DEBUG else [IsAuthenticated]
+    public_actions = {'by_license_plate', 'complaint_history', 'full_history_text', 'find_or_create'}
     filter_backends = [filters.SearchFilter, filters.OrderingFilter]
     search_fields = ['license_plate', 'make', 'model', 'vin', 'customer__name']
     ordering_fields = ['created_at', 'make', 'year']
     ordering = ['-created_at']
+
+    def get_permissions(self):
+        if settings.DEBUG or (
+            getattr(settings, 'PUBLIC_FRONTEND_API_ENABLED', True)
+            and self.action in self.public_actions
+        ):
+            return [AllowAny()]
+        return [permission() for permission in self.permission_classes]
 
     def get_serializer_class(self):
         """Return appropriate serializer based on action."""
@@ -137,30 +147,37 @@ class CarViewSet(viewsets.ModelViewSet):
         - existing car if found
         - newly created car if not found
         """
-        license_plate = request.data.get('license_plate', '').strip()
-        if not license_plate:
+        raw_plate = request.data.get('license_plate', '').strip()
+        if not raw_plate:
             return Response(
                 {'error': 'license_plate is required'},
                 status=status.HTTP_400_BAD_REQUEST
             )
 
+        normalized_plate = raw_plate.replace(' ', '')
+
         # Try to find existing car
-        try:
-            car = Car.objects.select_related('customer').get(
-                license_plate__iexact=license_plate
-            )
+        car = Car.objects.select_related('customer').filter(
+            license_plate__iexact=normalized_plate
+        ).first()
+        if not car and normalized_plate != raw_plate:
+            car = Car.objects.select_related('customer').filter(
+                license_plate__iexact=raw_plate
+            ).first()
+
+        if car:
             serializer = CarSerializer(car)
             return Response({
                 'car': serializer.data,
                 'created': False
             })
-        except Car.DoesNotExist:
-            # Create new car
-            serializer = CarCreateSerializer(data=request.data)
-            if serializer.is_valid():
-                car = serializer.save()
-                return Response({
-                    'car': CarSerializer(car).data,
-                    'created': True
-                }, status=status.HTTP_201_CREATED)
-            return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
+
+        # Create new car
+        serializer = CarCreateSerializer(data=request.data)
+        if serializer.is_valid():
+            car = serializer.save()
+            return Response({
+                'car': CarSerializer(car).data,
+                'created': True
+            }, status=status.HTTP_201_CREATED)
+        return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)

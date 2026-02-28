@@ -14,11 +14,20 @@ export default {
                 'primary': '#3b82f6', // Blue 500
                 'primary-hover': '#2563eb', // Blue 600
                 'secondary': '#475569', // Slate 600
+                'surface': '#0f172a',
+                'muted': '#94a3b8',
                 'danger': '#ef4444', // Red 500
                 'success': '#22c55e', // Green 500
                 'text-main': '#f8fafc', // Slate 50
                 'text-muted': '#94a3b8', // Slate 400
                 'border-color': '#1e293b', // Slate 800
+                'electric-cyan': '#22d3ee',
+                'race-red': '#ef4444',
+                'racing-black': '#020617',
+                'steel-gray': '#334155',
+                'chrome-silver': '#cbd5e1',
+                'pearl-white': '#f8fafc',
+                'carbon-fiber': '#111827',
             },
             backgroundImage: {
                 'carbon': 'linear-gradient(27deg, #0A0E27 5%, #1A1D2E 25%, #16213E 50%, #1A1D2E 75%, #0A0E27 95%)',

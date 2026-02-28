@@ -2,12 +2,16 @@
 URL configuration for Car Diagnosis System.
 """
 from django.contrib import admin
+from django.http import JsonResponse
 from django.urls import path, include
 from django.conf import settings
 from django.conf.urls.static import static
 from rest_framework import permissions
 from drf_yasg.views import get_schema_view
 from drf_yasg import openapi
+from rest_framework_simplejwt.views import TokenObtainPairView, TokenRefreshView
+
+schema_permissions = [permissions.AllowAny] if settings.DEBUG else [permissions.IsAuthenticated]
 
 # Swagger/OpenAPI documentation
 schema_view = get_schema_view(
@@ -19,16 +23,18 @@ schema_view = get_schema_view(
         license=openapi.License(name="MIT License"),
     ),
     public=True,
-    permission_classes=[permissions.AllowAny],
+    permission_classes=schema_permissions,
 )
 
 urlpatterns = [
+    path('healthz', lambda request: JsonResponse({'status': 'ok'}), name='healthz'),
+
     # Admin panel
     path('admin/', admin.site.urls),
 
-    # API Documentation
-    path('api/docs/', schema_view.with_ui('swagger', cache_timeout=0), name='schema-swagger-ui'),
-    path('api/redoc/', schema_view.with_ui('redoc', cache_timeout=0), name='schema-redoc'),
+    # Auth endpoints
+    path('api/v1/auth/token/', TokenObtainPairView.as_view(), name='token_obtain_pair'),
+    path('api/v1/auth/token/refresh/', TokenRefreshView.as_view(), name='token_refresh'),
 
     # API endpoints
     path('api/v1/customers/', include('apps.customers.urls')),
@@ -39,6 +45,13 @@ urlpatterns = [
     # Multi-modal RAG endpoints
     path('api/v1/ml/', include('apps.ml_models.urls')),
 ]
+
+if settings.DEBUG:
+    urlpatterns += [
+        # API Documentation (development only)
+        path('api/docs/', schema_view.with_ui('swagger', cache_timeout=0), name='schema-swagger-ui'),
+        path('api/redoc/', schema_view.with_ui('redoc', cache_timeout=0), name='schema-redoc'),
+    ]
 
 # Serve media files in development
 if settings.DEBUG:

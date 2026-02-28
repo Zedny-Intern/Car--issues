@@ -2,7 +2,10 @@
 Chat models for storing conversation sessions and messages.
 Each chat session is linked to a specific complaint and maintains history.
 """
+import re
+
 from django.db import models
+from django.db.models import Q
 from apps.complaints.models import Complaint
 
 
@@ -68,6 +71,13 @@ class ChatSession(models.Model):
             models.Index(fields=['is_active']),
             models.Index(fields=['-updated_at']),
         ]
+        constraints = [
+            models.UniqueConstraint(
+                fields=['complaint'],
+                condition=Q(is_active=True),
+                name='unique_active_chat_session_per_complaint',
+            ),
+        ]
 
     def __str__(self):
         return f"Chat Session: {self.title or f'#{self.id}'} - {self.complaint.car.license_plate}"
@@ -94,6 +104,182 @@ class ChatSession(models.Model):
         """Get the car for this chat session."""
         return self.complaint.car
 
+    @staticmethod
+    def _normalize_context_text(value, max_length=280):
+        normalized = " ".join((value or "").replace("\x00", " ").split())
+        if max_length and len(normalized) > max_length:
+            return normalized[:max_length].rstrip() + "..."
+        return normalized
+
+    @staticmethod
+    def _tokenize_query(value):
+        return {
+            token
+            for token in re.split(r'[^0-9A-Za-z\u0600-\u06FF]+', (value or '').lower())
+            if len(token) > 1
+        }
+
+    @staticmethod
+    def _normalize_reference_text(value):
+        return re.sub(r'[^0-9A-Za-z\u0600-\u06FF]+', ' ', (value or '').lower()).strip()
+
+    def get_uploaded_document_paths(self):
+        paths = []
+        for doc in self.complaint.documents.order_by('-uploaded_at'):
+            try:
+                path = str(doc.file.path)
+            except Exception:
+                path = ''
+            if path:
+                paths.append(path)
+        return paths
+
+    def resolve_uploaded_document_reference(self, reference_query=None):
+        uploaded_documents = list(self.complaint.documents.order_by('-uploaded_at')[:5])
+        if not uploaded_documents:
+            return None
+
+        normalized_query = self._normalize_reference_text(reference_query)
+        if not normalized_query:
+            return None
+
+        query_tokens = self._tokenize_query(normalized_query)
+        generic_document_terms = {
+            'file', 'files', 'document', 'documents', 'doc', 'docs', 'attachment',
+            'attachments', 'upload', 'uploaded', 'attach', 'attached', 'pdf', 'bdf',
+            'pfd', 'report', 'reports', 'paper', 'papers', 'scan', 'scans',
+            'ملف', 'الملف', 'ملفات', 'فايل', 'فایل', 'مستند', 'المستند',
+            'وثيقة', 'الوثيقة', 'مرفق', 'المرفق', 'مرفقات', 'المرفقات',
+            'مرفوع', 'المرفوع', 'مرفوعه', 'المرفوعة', 'مرفوعين',
+            'تقرير', 'التقرير', 'تقارير', 'pdf', 'بي', 'دي', 'اف',
+        }
+        content_request_terms = {
+            'content', 'contents', 'inside', 'summary', 'summarize', 'explain',
+            'show', 'read', 'review', 'what', 'tell',
+            'محتوى', 'محتوي', 'ملخص', 'الخلاصة', 'الخلاصه', 'جوه', 'داخل',
+            'فيه', 'فيها', 'الموجود', 'اقرا', 'اقرأ', 'راجع', 'وريني',
+            'ايه', 'إيه', 'شنو', 'شنوهو',
+        }
+
+        best_document = None
+        best_score = 0
+
+        for document in uploaded_documents:
+            file_name_tokens = self._tokenize_query(document.file_name)
+            overlap_score = len(query_tokens & file_name_tokens)
+            if overlap_score > best_score:
+                best_score = overlap_score
+                best_document = document
+
+        references_document_generically = bool(query_tokens & generic_document_terms)
+        asks_for_contents = bool(query_tokens & content_request_terms)
+
+        if best_document and best_score > 0:
+            match_reason = 'filename-match'
+            selected_document = best_document
+        elif references_document_generically or (len(uploaded_documents) == 1 and asks_for_contents):
+            match_reason = 'latest-upload'
+            selected_document = uploaded_documents[0]
+        else:
+            return None
+
+        try:
+            file_path = str(selected_document.file.path)
+        except Exception:
+            file_path = ''
+
+        return {
+            'id': selected_document.id,
+            'file_name': selected_document.file_name,
+            'file_type': selected_document.file_type,
+            'uploaded_at': selected_document.uploaded_at,
+            'is_analyzed': selected_document.is_analyzed,
+            'analysis_error': selected_document.analysis_error or '',
+            'file_path': file_path,
+            'match_reason': match_reason,
+        }
+
+    def get_uploaded_documents_context(
+        self,
+        max_documents=3,
+        max_excerpts_per_document=2,
+        reference_query=None,
+    ):
+        uploaded_documents = list(
+            self.complaint.documents.order_by('-uploaded_at')[:max_documents]
+        )
+        if not uploaded_documents:
+            return []
+
+        from apps.ml_models.models import DocumentMetadata
+
+        document_paths = {}
+        for document in uploaded_documents:
+            try:
+                document_paths[document.id] = str(document.file.path)
+            except Exception:
+                document_paths[document.id] = ''
+
+        indexed_metadata = {
+            metadata.file_path: metadata
+            for metadata in (
+                DocumentMetadata.objects
+                .filter(file_path__in=[path for path in document_paths.values() if path])
+                .prefetch_related('chunks')
+            )
+        }
+
+        query_tokens = self._tokenize_query(reference_query)
+        documents_context = []
+
+        for uploaded_document in uploaded_documents:
+            file_path = document_paths.get(uploaded_document.id, '')
+            metadata = indexed_metadata.get(file_path)
+            chunk_list = list(metadata.chunks.all()) if metadata else []
+
+            ranked_chunks = []
+            for chunk in chunk_list:
+                raw_text = chunk.content or chunk.caption or ''
+                cleaned_text = self._normalize_context_text(raw_text, max_length=320)
+                if not cleaned_text:
+                    continue
+
+                if query_tokens:
+                    score = len(query_tokens & self._tokenize_query(raw_text))
+                else:
+                    score = 0
+                if chunk.chunk_type == 'text':
+                    score += 0.1
+
+                ranked_chunks.append({
+                    'score': score,
+                    'page': chunk.page_number,
+                    'chunk_type': chunk.chunk_type,
+                    'text': cleaned_text,
+                })
+
+            if query_tokens:
+                ranked_chunks.sort(key=lambda item: (-item['score'], item['page'], item['chunk_type']))
+            else:
+                ranked_chunks.sort(key=lambda item: (item['page'], 0 if item['chunk_type'] == 'text' else 1))
+
+            documents_context.append({
+                'id': uploaded_document.id,
+                'file_name': uploaded_document.file_name,
+                'file_type': uploaded_document.file_type,
+                'uploaded_at': uploaded_document.uploaded_at,
+                'is_latest_upload': uploaded_document == uploaded_documents[0],
+                'is_analyzed': uploaded_document.is_analyzed,
+                'analysis_error': uploaded_document.analysis_error or '',
+                'is_indexed': bool(metadata and metadata.indexed),
+                'index_error': metadata.index_error if metadata else '',
+                'page_count': metadata.page_count if metadata else None,
+                'chunk_count': len(chunk_list),
+                'excerpts': ranked_chunks[:max_excerpts_per_document],
+            })
+
+        return documents_context
+
     def get_messages_for_context(self, limit=None):
         """
         Get formatted messages for LLM context.
@@ -106,7 +292,11 @@ class ChatSession(models.Model):
         """
         messages_query = self.messages.order_by('created_at')
         if limit:
-            messages_query = messages_query[:limit]
+            # Keep chronological order but restrict to the most recent messages.
+            recent_ids = list(
+                self.messages.order_by('-created_at').values_list('id', flat=True)[:limit]
+            )
+            messages_query = self.messages.filter(id__in=recent_ids).order_by('created_at')
 
         return [
             {
@@ -144,7 +334,7 @@ class ChatSession(models.Model):
             'duration_minutes': (self.updated_at - self.created_at).total_seconds() / 60,
         }
 
-    def build_full_context_for_llm(self, include_message_limit=10):
+    def build_full_context_for_llm(self, include_message_limit=10, reference_query=None):
         """
         Build complete context for LLM including:
         - Vehicle information
@@ -168,6 +358,10 @@ class ChatSession(models.Model):
             id=self.complaint.id
         )[:5]
         
+        uploaded_documents = self.get_uploaded_documents_context(
+            reference_query=reference_query
+        )
+
         context = {
             'vehicle': {
                 'display_name': car.display_name,
@@ -201,6 +395,8 @@ class ChatSession(models.Model):
             ],
             'conversation_history': conversation_messages,
             'recurring_issues': car.get_recurring_issues(),
+            'uploaded_documents': uploaded_documents,
+            'uploaded_documents_count': len(uploaded_documents),
         }
         
         return context

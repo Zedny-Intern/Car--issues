@@ -34,7 +34,7 @@ class ErrorBoundary extends Component {
                                 <p className="text-chrome-silver mb-4">
                                     We're sorry for the inconvenience. Please try refreshing the page.
                                 </p>
-                                {process.env.NODE_ENV === 'development' && this.state.error && (
+                                {import.meta.env.DEV && this.state.error && (
                                     <pre className="text-left text-xs text-race-red bg-steel-gray/30 p-4 rounded overflow-auto max-h-48">
                                         {this.state.error.toString()}
                                     </pre>

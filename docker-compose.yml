@@ -1,7 +1,4 @@
-version: '3.8'
-
 services:
-  # PostgreSQL Database
   db:
     image: postgres:15-alpine
     container_name: car_diagnosis_db
@@ -11,83 +8,154 @@ services:
       POSTGRES_PASSWORD: ${DB_PASSWORD:-postgres}
     volumes:
       - postgres_data:/var/lib/postgresql/data
-    ports:
-      - "5432:5432"
     healthcheck:
-      test: [ "CMD-SHELL", "pg_isready -U ${DB_USER:-postgres}" ]
+      test: ["CMD-SHELL", "pg_isready -U ${DB_USER:-postgres} -d ${DB_NAME:-car_diagnosis_db}"]
       interval: 10s
       timeout: 5s
       retries: 5
+    restart: unless-stopped
 
-  # Redis for Celery
   redis:
     image: redis:7-alpine
     container_name: car_diagnosis_redis
-    ports:
-      - "6379:6379"
+    command: ["redis-server", "--appendonly", "yes"]
+    volumes:
+      - redis_data:/data
     healthcheck:
-      test: [ "CMD", "redis-cli", "ping" ]
+      test: ["CMD", "redis-cli", "ping"]
       interval: 10s
       timeout: 5s
       retries: 5
+    restart: unless-stopped
 
-  # Django Backend
   backend:
     build:
       context: ./backend
       dockerfile: Dockerfile
+      args:
+        INSTALL_LOCAL_ML: ${INSTALL_LOCAL_ML:-false}
+        INSTALL_OPTIONAL_LLM_FALLBACKS: ${INSTALL_OPTIONAL_LLM_FALLBACKS:-false}
     container_name: car_diagnosis_backend
-    command: >
-      sh -c "python manage.py migrate &&
-             python manage.py collectstatic --noinput &&
-             python manage.py runserver 0.0.0.0:8000"
+    user: "0:0"
+    command:
+      - /app/docker-entrypoint.sh
     volumes:
-      - ./backend:/app
       - static_volume:/app/staticfiles
       - media_volume:/app/media
-      - ./data:/data # Multi-modal RAG data
-      - "./rag data:/rag_data" # Existing car manuals
-    ports:
-      - "8000:8000"
+      - ./data:/data
+      - "./rag data:/rag_data"
+    expose:
+      - "8000"
     env_file:
       - .env
     environment:
-      - DEBUG=True
       - DB_HOST=db
       - REDIS_URL=redis://redis:6379/0
       - PYTHONUNBUFFERED=1
       - TF_USE_LEGACY_KERAS=0
-      - GROQ_API_KEY={GROQ_API_KEY}
+      - PUBLIC_FRONTEND_API_ENABLED=${PUBLIC_FRONTEND_API_ENABLED:-True}
+      - GROQ_API_KEY=${GROQ_API_KEY}
+      - COHERE_API_KEY=${COHERE_API_KEY}
+      - USE_COHERE=${USE_COHERE:-True}
+      - COHERE_COMMAND_MODEL=${COHERE_COMMAND_MODEL:-command-a-03-2025}
+      - COHERE_COMMAND_FALLBACK_MODELS=${COHERE_COMMAND_FALLBACK_MODELS:-command-a-03-2025,command-r-08-2024,command-r7b-12-2024}
+      - COHERE_VISION_MODEL=${COHERE_VISION_MODEL:-command-a-vision-07-2025}
+      - COHERE_IMAGE_CHAT_ENABLED=${COHERE_IMAGE_CHAT_ENABLED:-True}
+      - COHERE_IMAGE_SCOPE=${COHERE_IMAGE_SCOPE:-general}
+      - COHERE_IMAGE_MAX_IMAGES_PER_MESSAGE=${COHERE_IMAGE_MAX_IMAGES_PER_MESSAGE:-3}
+      - COHERE_EMBED_MODEL=${COHERE_EMBED_MODEL:-embed-v4.0}
+      - COHERE_EMBED_OUTPUT_DIMENSION=${COHERE_EMBED_OUTPUT_DIMENSION:-512}
+      - LLM_PROVIDER_STRATEGY=${LLM_PROVIDER_STRATEGY:-local_first}
+      - OLLAMA_BASE_URL=${OLLAMA_BASE_URL:-http://host.docker.internal:11434}
+      - OLLAMA_TEXT_MODEL=${OLLAMA_TEXT_MODEL:-gpt-oss:120b-cloud}
+      - OLLAMA_VISION_MODEL=${OLLAMA_VISION_MODEL:-llava:latest}
+      - TEXT_EMBEDDING_BACKEND=${TEXT_EMBEDDING_BACKEND:-cohere}
+      - TEXT_EMBEDDING_MODEL=${TEXT_EMBEDDING_MODEL:-embed-v4.0}
+      - TEXT_EMBEDDING_DIMENSION=${TEXT_EMBEDDING_DIMENSION:-512}
+      - ENABLE_LOCAL_TEXT_EMBEDDINGS=${ENABLE_LOCAL_TEXT_EMBEDDINGS:-False}
+      - ENABLE_LOCAL_CLASSIFIER=${ENABLE_LOCAL_CLASSIFIER:-False}
+      - RAG_DATA_STATIC_DIR=/data/static
+      - RAG_DATA_UPLOADS_DIR=/data/uploads
+      - RAG_EXTRACTED_IMAGES_DIR=/data/extracted_images
+      - RAG_DATA_DIR=/rag_data
+      - RAG_FAISS_DB_DIR=/data/faiss_db
     depends_on:
       db:
         condition: service_healthy
       redis:
         condition: service_healthy
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/healthz', timeout=5).read()"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 60s
     restart: unless-stopped
 
-  # Celery Worker
   celery:
     build:
       context: ./backend
       dockerfile: Dockerfile
+      args:
+        INSTALL_LOCAL_ML: ${INSTALL_LOCAL_ML:-false}
+        INSTALL_OPTIONAL_LLM_FALLBACKS: ${INSTALL_OPTIONAL_LLM_FALLBACKS:-false}
     container_name: car_diagnosis_celery
-
-    command: watchmedo auto-restart -d . -p '*.py' -- celery -A car_diagnosis_system worker --loglevel=info
+    user: "0:0"
+    command:
+      - /app/docker-entrypoint.sh
+      - celery
+      - -A
+      - car_diagnosis_system
+      - worker
+      - --loglevel=info
+      - --concurrency=${CELERY_CONCURRENCY:-2}
     volumes:
-      - ./backend:/app
+      - media_volume:/app/media
+      - ./data:/data
+      - "./rag data:/rag_data"
     env_file:
       - .env
     environment:
+      - C_FORCE_ROOT=true
       - DB_HOST=db
       - REDIS_URL=redis://redis:6379/0
       - PYTHONUNBUFFERED=1
+      - TF_USE_LEGACY_KERAS=0
+      - PUBLIC_FRONTEND_API_ENABLED=${PUBLIC_FRONTEND_API_ENABLED:-True}
+      - GROQ_API_KEY=${GROQ_API_KEY}
+      - COHERE_API_KEY=${COHERE_API_KEY}
+      - USE_COHERE=${USE_COHERE:-True}
+      - COHERE_COMMAND_MODEL=${COHERE_COMMAND_MODEL:-command-a-03-2025}
+      - COHERE_COMMAND_FALLBACK_MODELS=${COHERE_COMMAND_FALLBACK_MODELS:-command-a-03-2025,command-r-08-2024,command-r7b-12-2024}
+      - COHERE_VISION_MODEL=${COHERE_VISION_MODEL:-command-a-vision-07-2025}
+      - COHERE_IMAGE_CHAT_ENABLED=${COHERE_IMAGE_CHAT_ENABLED:-True}
+      - COHERE_IMAGE_SCOPE=${COHERE_IMAGE_SCOPE:-general}
+      - COHERE_IMAGE_MAX_IMAGES_PER_MESSAGE=${COHERE_IMAGE_MAX_IMAGES_PER_MESSAGE:-3}
+      - COHERE_EMBED_MODEL=${COHERE_EMBED_MODEL:-embed-v4.0}
+      - COHERE_EMBED_OUTPUT_DIMENSION=${COHERE_EMBED_OUTPUT_DIMENSION:-512}
+      - LLM_PROVIDER_STRATEGY=${LLM_PROVIDER_STRATEGY:-local_first}
+      - OLLAMA_BASE_URL=${OLLAMA_BASE_URL:-http://host.docker.internal:11434}
+      - OLLAMA_TEXT_MODEL=${OLLAMA_TEXT_MODEL:-gpt-oss:120b-cloud}
+      - OLLAMA_VISION_MODEL=${OLLAMA_VISION_MODEL:-llava:latest}
+      - TEXT_EMBEDDING_BACKEND=${TEXT_EMBEDDING_BACKEND:-cohere}
+      - TEXT_EMBEDDING_MODEL=${TEXT_EMBEDDING_MODEL:-embed-v4.0}
+      - TEXT_EMBEDDING_DIMENSION=${TEXT_EMBEDDING_DIMENSION:-512}
+      - ENABLE_LOCAL_TEXT_EMBEDDINGS=${ENABLE_LOCAL_TEXT_EMBEDDINGS:-False}
+      - ENABLE_LOCAL_CLASSIFIER=${ENABLE_LOCAL_CLASSIFIER:-False}
+      - RAG_DATA_STATIC_DIR=/data/static
+      - RAG_DATA_UPLOADS_DIR=/data/uploads
+      - RAG_EXTRACTED_IMAGES_DIR=/data/extracted_images
+      - RAG_DATA_DIR=/rag_data
+      - RAG_FAISS_DB_DIR=/data/faiss_db
     depends_on:
-      - db
-      - redis
-      - backend
+      db:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      backend:
+        condition: service_healthy
     restart: unless-stopped
 
-  # React Frontend
   frontend:
     build:
       context: ./frontend
@@ -95,15 +163,24 @@ services:
     container_name: car_diagnosis_frontend
     ports:
       - "80:80"
+    volumes:
+      - static_volume:/srv/static:ro
+      - media_volume:/srv/media:ro
     depends_on:
-      - backend
+      backend:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "wget -q -O /dev/null http://127.0.0.1/health || exit 1"]
+      interval: 30s
+      timeout: 5s
+      retries: 5
     restart: unless-stopped
 
 volumes:
   postgres_data:
+  redis_data:
   static_volume:
   media_volume:
-
 
 networks:
   default:

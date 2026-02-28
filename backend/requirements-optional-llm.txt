@@ -1,0 +1,4 @@
+# Optional fallback LLM providers.
+# Docker can skip this file by setting INSTALL_OPTIONAL_LLM_FALLBACKS=false.
+langchain-openai==0.2.13
+langchain-groq==0.2.5

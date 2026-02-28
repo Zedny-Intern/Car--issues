@@ -4,8 +4,7 @@ Text only.
 """
 import os
 import logging
-from typing import List, Dict, Optional
-from pathlib import Path
+from typing import List, Dict
 
 from django.conf import settings
 
@@ -183,6 +182,46 @@ class MultimodalVectorStore:
                       filter_metadata: Dict = None) -> List[Dict]:
         """Deprecated. Returns empty list."""
         return []
+
+    def delete_by_file_hash(self, file_hash: str) -> int:
+        """
+        Delete vector entries that belong to a specific document hash.
+
+        Returns:
+            Number of removed vector records.
+        """
+        if not file_hash or not self.text_vectorstore:
+            return 0
+
+        try:
+            target_hash = str(file_hash)
+            index_to_docstore_id = getattr(self.text_vectorstore, 'index_to_docstore_id', {})
+            docstore = getattr(self.text_vectorstore, 'docstore', None)
+            doc_map = getattr(docstore, '_dict', {}) if docstore else {}
+
+            ids_to_remove = []
+            for doc_id in index_to_docstore_id.values():
+                doc = doc_map.get(doc_id)
+                metadata = getattr(doc, 'metadata', {}) if doc else {}
+                doc_hash = str(metadata.get('file_hash', ''))
+                if not doc_hash:
+                    continue
+                if doc_hash == target_hash or doc_hash.startswith(target_hash) or target_hash.startswith(doc_hash):
+                    ids_to_remove.append(doc_id)
+
+            if not ids_to_remove:
+                return 0
+
+            # Keep order, remove duplicates.
+            ids_to_remove = list(dict.fromkeys(ids_to_remove))
+            self.text_vectorstore.delete(ids_to_remove)
+            self.text_vectorstore.save_local(self.text_index_path)
+            logger.info(f"Removed {len(ids_to_remove)} vectors for file hash {target_hash[:12]}")
+            return len(ids_to_remove)
+
+        except Exception as e:
+            logger.error(f"Error deleting vectors by file hash: {e}")
+            return 0
     
     def as_retriever(self, search_kwargs: Dict = None):
         """
@@ -201,7 +240,7 @@ class MultimodalVectorStore:
         if self.text_vectorstore:
             try:
                 text_count = self.text_vectorstore.index.ntotal
-            except:
+            except Exception:
                 pass
         
         return {

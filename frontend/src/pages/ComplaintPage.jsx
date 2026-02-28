@@ -9,8 +9,11 @@ import apiClient from '../services/api';
 
 import ThemeToggle from '../components/ui/ThemeToggle';
 
+const MAX_DB_INTEGER = 2147483647;
+
 export default function ComplaintPage() {
     const navigate = useNavigate();
+    const maxCarYear = new Date().getFullYear() + 1;
     const [formData, setFormData] = useState({
         customer_name: '',
         customer_email: '',
@@ -27,9 +30,36 @@ export default function ComplaintPage() {
 
     const [loading, setLoading] = useState(false);
     const [result, setResult] = useState(null);
+    const [submissionError, setSubmissionError] = useState('');
 
     const handleSubmit = async (e) => {
         e.preventDefault();
+        setSubmissionError('');
+
+        if (!formData.customer_email.trim() && !formData.customer_phone.trim()) {
+            setSubmissionError('Enter at least an email or a phone number.');
+            return;
+        }
+
+        const yearValue = `${formData.car_year ?? ''}`.trim();
+        const mileageValue = `${formData.car_mileage ?? ''}`.trim();
+
+        if (yearValue) {
+            const parsedYear = Number(yearValue);
+            if (!Number.isInteger(parsedYear) || parsedYear < 1900 || parsedYear > maxCarYear) {
+                setSubmissionError(`Car year must be between 1900 and ${maxCarYear}.`);
+                return;
+            }
+        }
+
+        if (mileageValue) {
+            const parsedMileage = Number(mileageValue);
+            if (!Number.isInteger(parsedMileage) || parsedMileage < 0 || parsedMileage > MAX_DB_INTEGER) {
+                setSubmissionError(`Car mileage must be between 0 and ${MAX_DB_INTEGER.toLocaleString()} km.`);
+                return;
+            }
+        }
+
         setLoading(true);
 
         const response = await apiClient.submitComplaint(formData);
@@ -39,7 +69,7 @@ export default function ComplaintPage() {
         if (response.success) {
             setResult(response.data.data);
         } else {
-            alert('Error: ' + response.error);
+            setSubmissionError(response.error || 'Failed to submit complaint.');
         }
     };
 
@@ -77,6 +107,12 @@ export default function ComplaintPage() {
                 {!result ? (
                     <Card>
                         <form onSubmit={handleSubmit} className="space-y-8">
+                            {submissionError && (
+                                <div className="rounded-lg border border-red-400/40 bg-red-500/10 px-4 py-3 text-sm text-red-200 whitespace-pre-line">
+                                    {submissionError}
+                                </div>
+                            )}
+
                             {/* Customer Info */}
                             <div>
                                 <h2 className="text-2xl font-heading font-bold text-text-main mb-4 flex items-center gap-2">
@@ -142,6 +178,8 @@ export default function ComplaintPage() {
                                         type="number"
                                         value={formData.car_year}
                                         onChange={handleChange}
+                                        min="1900"
+                                        max={maxCarYear}
                                     />
                                     <Input
                                         label="Mileage (km)"
@@ -149,6 +187,8 @@ export default function ComplaintPage() {
                                         type="number"
                                         value={formData.car_mileage}
                                         onChange={handleChange}
+                                        min="0"
+                                        max={MAX_DB_INTEGER}
                                     />
                                 </div>
                             </div>

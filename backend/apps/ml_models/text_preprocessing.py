@@ -2,7 +2,6 @@
 Text preprocessing utilities for complaint classification.
 """
 import re
-import string
 
 
 def clean_text(text):

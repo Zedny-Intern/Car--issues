@@ -1,262 +1,339 @@
-# 🚗 Car Diagnosis System
+# Car Diagnosis System
 
-**AI-Powered Vehicle Complaint Analysis & Diagnosis**
+دليل تشغيل المشروع باستخدام Docker Compose.
 
-A comprehensive system that uses machine learning and multi-modal AI to diagnose car issues, chat with virtual mechanics, and track vehicle history.
+## 1. المتطلبات
 
----
-
-## ✨ Features
-
-- 🤖 **AI Complaint Classification** - Automatic categorization with 98% accuracy
-- 💬 **Smart Chat** - Multi-modal AI mechanic (text + images via LLaVA)
-- 📚 **RAG System** - Search 376+ car manuals for relevant information
-- 🔍 **History Search** - Track all complaints by license plate
-- 📸 **Image Analysis** - Upload car issue photos for AI diagnosis
-- 🎨 **Modern UI** - Automotive-themed design with React
-
----
-
-## 🚀 Quick Start
-
-### Prerequisites
 - Docker Desktop
-- Node.js 20+
-- Ollama (optional, for local LLM)
+- Docker Compose
+- ملف `.env` صالح
 
-### 1. Clone & Setup
-```bash
-git clone <repo-url>
-cd car--issues
+تأكد أن Docker شغال قبل أي خطوة:
+
+```powershell
+docker version
+docker compose version
 ```
 
-### 2. Environment Configuration
-```bash
-# Copy example env file
-cp .env.example .env
+## 2. الخدمات داخل المشروع
 
-# Edit .env and add your API keys
-GROQ_API_KEY=your_groq_key_here
+- `frontend`: Nginx + React على المنفذ `80`
+- `backend`: Django + Gunicorn
+- `celery`: عامل الخلفية للمهام غير المتزامنة
+- `db`: PostgreSQL
+- `redis`: Redis
+
+## 3. تجهيز المشروع أول مرة
+
+انسخ ملف البيئة:
+
+```powershell
+Copy-Item .env.example .env
 ```
 
-### 3. Start Backend (Docker)
-```bash
+بعدها عدل ملف `.env` وأهم المتغيرات:
+
+```env
+SECRET_KEY=change-this
+DEBUG=False
+ALLOWED_HOSTS=localhost,127.0.0.1
+DB_PASSWORD=strong-password
+COHERE_API_KEY=your-cohere-key
+```
+
+## 4. وضع التشغيل الخفيف الافتراضي
+
+المشروع مضبوط افتراضيًا على وضع خفيف داخل Docker:
+
+- لا يثبت local ML stack الثقيلة إلا إذا طلبت ذلك
+- يستخدم Cohere للـ embeddings
+- يستخدم fallback خفيف للتصنيف بدل تحميل TensorFlow محليًا
+
+القيم الافتراضية المهمة:
+
+```env
+INSTALL_LOCAL_ML=false
+INSTALL_OPTIONAL_LLM_FALLBACKS=false
+ENABLE_LOCAL_TEXT_EMBEDDINGS=False
+ENABLE_LOCAL_CLASSIFIER=False
+TEXT_EMBEDDING_BACKEND=cohere
+```
+
+إذا أردت تفعيل الـ local ML الثقيل:
+
+```env
+INSTALL_LOCAL_ML=true
+ENABLE_LOCAL_TEXT_EMBEDDINGS=True
+ENABLE_LOCAL_CLASSIFIER=True
+```
+
+ثم أعد البناء.
+
+## 5. البناء
+
+بناء كل الصور:
+
+```powershell
+docker compose build
+```
+
+بناء بدون cache:
+
+```powershell
+docker compose build --no-cache
+```
+
+بناء خدمة واحدة فقط:
+
+```powershell
+docker compose build backend
+docker compose build frontend
+```
+
+## 6. التشغيل
+
+تشغيل المشروع في الخلفية:
+
+```powershell
 docker compose up -d
 ```
 
-### 4. Start Frontend (Development)
-```bash
-cd frontend
-npm install
-npm run dev
+تشغيل مع إعادة بناء:
+
+```powershell
+docker compose up -d --build
 ```
 
-### 5. Access
-- **Frontend**: http://localhost:5173
-- **API**: http://localhost:8000/api/v1/
-- **Admin**: http://localhost:8000/admin/
+تشغيل ومشاهدة اللوج مباشرة:
 
----
-
-## 📁 Project Structure
-
-```
-car--issues/
-├── backend/              # Django REST API
-├── frontend/             # React + Vite + Tailwind
-├── rag data/             # Car manuals (376 PDFs)
-├── docker-compose.yml    # Services orchestration
-└── .env                  # Environment variables
+```powershell
+docker compose up --build
 ```
 
----
+## 7. التحقق بعد التشغيل
 
-## 🤖 AI Models
+حالة الخدمات:
 
-| Model | Purpose | Size | Location |
-|-------|---------|------|----------|
-| the_model.h5 | Complaint Classification | 803 MB | Local |
-| all-MiniLM-L6-v2 | Text Embeddings | 90 MB | Cached |
-| CLIP ViT-B-32 | Image Embeddings | 300 MB | Cached |
-| LLaVA | Multi-modal LLM | 4.5 GB | Ollama |
-| Qwen3-32B | Chat LLM | - | GROQ API |
-
----
-
-## 📡 API Endpoints
-
-### Complaints
-- `POST /api/v1/complaints/quick-submit/` - Submit complaint
-- `GET /api/v1/complaints/` - List complaints
-
-### Chat
-- `POST /api/v1/chat/sessions/` - Create chat session
-- `POST /api/v1/chat/sessions/{id}/send_message/` - Send message (+ images)
-
-### Search
-- `GET /api/v1/cars/by_license_plate/?plate=ABC123` - Search by plate
-- `GET /api/v1/cars/{id}/complaint_history/` - Get history
-
----
-
-## 🛠️ Tech Stack
-
-**Backend:**
-- Django 5.0 + DRF
-- PostgreSQL 15
-- Redis 7 + Celery
-- TensorFlow, LangChain
-- Docker
-
-**Frontend:**
-- React 18 + Vite
-- Tailwind CSS
-- React Router v6
-
-**AI/ML:**
-- TensorFlow/Keras
-- LangChain + FAISS
-- HuggingFace Transformers
-- Ollama (LLaVA)
-- GROQ API
-
----
-
-## 📚 Documentation
-
-- [`PROJECT_BRIEF.md`](./PROJECT_BRIEF.md) - Complete project overview
-- [`startup_guide.md`](./startup_guide.md) - Detailed setup instructions
-- [`design_system.md`](./design_system.md) - UI/UX guidelines
-- [`frontend/README.md`](./frontend/README.md) - Frontend documentation
-
----
-
-## 🐛 Troubleshooting
-
-### Frontend not loading?
-```bash
-# Check if Vite is running
-cd frontend
-npm run dev
-```
-
-### Backend not responding?
-```bash
-# Check Docker containers
+```powershell
 docker compose ps
-docker compose logs backend
 ```
 
-### Chat not working?
-```bash
-# Verify Ollama is running
-ollama serve
-ollama list
+الواجهة:
 
-# Check GROQ API key in .env
+```text
+http://localhost
 ```
 
----
+فحص Nginx health:
 
-## 🔧 Development
-
-### Run Tests
-```bash
-# Backend
-docker compose exec backend python manage.py test
-
-# Frontend
-cd frontend
-npm run build  # Check for errors
+```text
+http://localhost/health
 ```
 
-### View Logs
-```bash
+ملاحظة:
+
+- `backend` عليه healthcheck داخلي على `/healthz`
+- `frontend` هو المدخل الخارجي الرئيسي
+
+## 8. المراقبة
+
+عرض كل اللوج:
+
+```powershell
+docker compose logs -f
+```
+
+عرض لوج خدمة معينة:
+
+```powershell
 docker compose logs -f backend
 docker compose logs -f celery
+docker compose logs -f frontend
+docker compose logs -f db
+docker compose logs -f redis
 ```
 
-### Reset Database
-```bash
-docker compose down -v
-docker compose up -d
+متابعة حالة الحاويات:
+
+```powershell
+docker compose ps
+```
+
+فحص health status بتفصيل أكبر:
+
+```powershell
+docker inspect car_diagnosis_backend --format "{{json .State.Health }}"
+docker inspect car_diagnosis_frontend --format "{{json .State.Health }}"
+docker inspect car_diagnosis_db --format "{{json .State.Health }}"
+docker inspect car_diagnosis_redis --format "{{json .State.Health }}"
+```
+
+الدخول داخل الحاوية:
+
+```powershell
+docker compose exec backend sh
+docker compose exec frontend sh
+docker compose exec db sh
+docker compose exec redis sh
+```
+
+## 9. أوامر تشغيل مهمة داخل backend
+
+تشغيل priming للـ RAG/runtime يدويًا:
+
+```powershell
+docker compose exec backend python manage.py prime_runtime
+```
+
+تشغيله في الخلفية:
+
+```powershell
+docker compose exec backend python manage.py prime_runtime --async
+```
+
+تطبيق migrations يدويًا:
+
+```powershell
 docker compose exec backend python manage.py migrate
 ```
 
----
+جمع الملفات الثابتة:
 
-## 📦 Dependencies
+```powershell
+docker compose exec backend python manage.py collectstatic --noinput
+```
 
-- **Backend**: 81 Python packages
-- **Frontend**: 329 npm packages
-- **ML Models**: ~6 GB total
+## 10. إعادة التشغيل
 
----
+إعادة تشغيل كل الخدمات:
 
-## 🔐 Security Notes
+```powershell
+docker compose restart
+```
 
-- Never commit `.env` file
-- Use strong `SECRET_KEY` in production
-- Enable SSL/TLS for production
-- Set `DEBUG=False` in production
-- Configure proper CORS origins
+إعادة تشغيل خدمة معينة:
 
----
+```powershell
+docker compose restart backend
+docker compose restart celery
+docker compose restart frontend
+```
 
-## 📊 Performance
+## 11. الإيقاف
 
-- First Load: < 2s
-- API Response: < 500ms
-- Classification: < 1s
-- RAG Query: 2-5s
-- Chat: 3-10s (streaming)
+إيقاف الخدمات بدون حذف الحاويات:
 
----
+```powershell
+docker compose stop
+```
 
-## 🎨 Design
+إيقاف خدمة واحدة:
 
-**Automotive Theme** inspired by luxury car dashboards:
-- Carbon fiber textures
-- LED effects
-- Metallic gradients
-- Electric cyan accents
-- Racing red CTAs
+```powershell
+docker compose stop backend
+```
 
----
+إيقاف وحذف الحاويات والشبكة:
 
-## 📝 License
+```powershell
+docker compose down
+```
 
-[Your License Here]
+إيقاف مع حذف الـ volumes:
 
----
+```powershell
+docker compose down -v
+```
 
-## 👥 Contributing
+تحذير:
 
-1. Fork the repository
-2. Create feature branch
-3. Commit changes
-4. Push to branch
-5. Open pull request
+- `docker compose down -v` سيحذف بيانات PostgreSQL وRedis وstatic/media volumes
 
----
+## 12. إعادة البناء بعد تعديل الإعدادات
 
-## 🆘 Support
+إذا عدلت أي شيء في:
 
-For issues or questions:
-1. Check documentation files
-2. Review logs: `docker compose logs`
-3. Open an issue on GitHub
+- `Dockerfile`
+- `requirements`
+- `.env` الخاصة بخيارات البناء
 
----
+نفذ:
 
-## 🎯 Roadmap
+```powershell
+docker compose down
+docker compose build --no-cache
+docker compose up -d
+```
 
-- [ ] Mobile app (React Native)
-- [ ] Admin dashboard enhancements
-- [ ] Multi-language support
-- [ ] Analytics & reporting
-- [ ] PWA support
+ولو عدلت فقط كود Python أو React داخل الصور:
 
----
+```powershell
+docker compose up -d --build
+```
 
-**Built with ❤️ using AI & Modern Web Technologies**
+## 13. تنظيف الصور والكاش
+
+حذف الحاويات المتوقفة والشبكات غير المستخدمة:
+
+```powershell
+docker system prune
+```
+
+تنظيف أقوى:
+
+```powershell
+docker system prune -a
+```
+
+حذف volumes غير المستخدمة:
+
+```powershell
+docker volume prune
+```
+
+## 14. أماكن البيانات المهمة
+
+- بيانات PostgreSQL داخل volume: `postgres_data`
+- بيانات Redis داخل volume: `redis_data`
+- الملفات الثابتة داخل volume: `static_volume`
+- الملفات المرفوعة داخل volume: `media_volume`
+- ملفات RAG المحلية على الجهاز: `./data`
+- ملفات manuals الثابتة: `./rag data`
+
+## 15. أوامر سريعة مختصرة
+
+تشغيل:
+
+```powershell
+docker compose up -d --build
+```
+
+مراقبة:
+
+```powershell
+docker compose logs -f
+```
+
+حالة الخدمات:
+
+```powershell
+docker compose ps
+```
+
+إيقاف:
+
+```powershell
+docker compose down
+```
+
+إيقاف مع حذف البيانات:
+
+```powershell
+docker compose down -v
+```
+
+## 16. ملاحظات مهمة
+
+- الوضع الافتراضي خفيف ويحتاج `COHERE_API_KEY` لكي يعمل الـ RAG بشكل كامل
+- لو شغلت `INSTALL_LOCAL_ML=true` ستزيد الصورة بشكل واضح لأن TensorFlow والموديلات المحلية ستدخل في البناء
+- بعد أي تغيير في متغيرات build args يجب إعادة `build` وليس `restart` فقط

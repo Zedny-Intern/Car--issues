@@ -3,19 +3,14 @@ RAG Agent using LangChain chains.
 Text-only version.
 """
 import logging
-from typing import List, Dict, Optional
-
-from django.conf import settings
+from typing import List, Dict
 
 logger = logging.getLogger(__name__)
 
 # LangChain
 try:
     from langchain.chains import RetrievalQA
-    from langchain.chains.combine_documents import create_stuff_documents_chain
-    from langchain_core.prompts import ChatPromptTemplate, PromptTemplate
-    from langchain_core.output_parsers import StrOutputParser
-    from langchain_core.runnables import RunnablePassthrough
+    from langchain_core.prompts import PromptTemplate
     LANGCHAIN_CHAINS_AVAILABLE = True
 except ImportError:
     RetrievalQA = None
@@ -124,8 +119,47 @@ Answer:""",
         except Exception as e:
             logger.error(f"Error creating retrieval chain: {e}")
             return None
+
+    def invalidate_cache(self):
+        """Drop cached retrieval chain so new indexed documents are visible immediately."""
+        self._retrieval_chain = None
+
+    def warm_up(self) -> Dict:
+        """Load embeddings/vector store/LLM chain eagerly in the background."""
+        status = {
+            'embedding_service_ready': False,
+            'vector_store_ready': False,
+            'retrieval_chain_ready': False,
+            'multimodal_llm_ready': False,
+        }
+
+        try:
+            status['embedding_service_ready'] = self.embedding_service.text_embeddings is not None
+        except Exception as exc:
+            logger.warning("Embedding warmup failed: %s", exc)
+
+        try:
+            status['vector_store_ready'] = self.vector_store is not None
+        except Exception as exc:
+            logger.warning("Vector store warmup failed: %s", exc)
+
+        try:
+            chain = self.get_retrieval_chain()
+            status['retrieval_chain_ready'] = chain is not None
+        except Exception as exc:
+            logger.warning("Retrieval chain warmup failed: %s", exc)
+
+        try:
+            llm_status = self.multimodal_llm.get_status()
+            status['multimodal_llm_ready'] = bool(
+                llm_status.get('cohere_enabled') or llm_status.get('fallback_initialized')
+            )
+        except Exception as exc:
+            logger.warning("LLM warmup failed: %s", exc)
+
+        return status
     
-    def retrieve(self, query: str, top_k: int = 5) -> Dict:
+    def retrieve(self, query: str, top_k: int = 5, preferred_source_paths: List[str] = None) -> Dict:
         """
         Retrieve relevant documents using LangChain.
         Text only.
@@ -140,11 +174,39 @@ Answer:""",
         logger.info(f"Retrieving for query: {query[:100]}...")
         
         try:
+            preferred_source_paths = [str(path) for path in (preferred_source_paths or []) if path]
+            search_pool_size = max(top_k, 5)
+            if preferred_source_paths:
+                search_pool_size = max(top_k * 8, 24)
+
             # Search text using LangChain vectorstore
             text_results = self.vector_store.search_text(
                 query=query, 
-                top_k=top_k
+                top_k=search_pool_size
             )
+
+            if preferred_source_paths:
+                preferred_set = set(preferred_source_paths)
+                preferred_results = []
+                general_results = []
+                seen_ids = set()
+
+                for result in text_results:
+                    metadata = result.get('metadata', {}) or {}
+                    result_id = result.get('id') or metadata.get('doc_id') or metadata.get('chunk_id')
+                    if result_id in seen_ids:
+                        continue
+                    seen_ids.add(result_id)
+
+                    source_path = str(metadata.get('source', ''))
+                    if source_path in preferred_set:
+                        preferred_results.append(result)
+                    else:
+                        general_results.append(result)
+
+                text_results = (preferred_results + general_results)[:top_k]
+            else:
+                text_results = text_results[:top_k]
             
             # Build context
             context = self._build_context(text_results)
@@ -172,12 +234,26 @@ Answer:""",
         length = 0
         
         if text_results:
-            parts.append(" RELEVANT INFORMATION FROM CAR MANUALS:\n")
+            parts.append(" RELEVANT INFORMATION FROM INDEXED FILES:\n")
             for i, r in enumerate(text_results[:5], 1):
                 content = r.get('content', '')
-                source = r.get('metadata', {}).get('file_name', 'Unknown')
-                page = r.get('metadata', {}).get('page', '?')
-                entry = f"\n[{i}] Source: {source} (Page {page})\n{content[:500]}..."
+                metadata = r.get('metadata', {}) or {}
+                source = metadata.get('file_name', 'Unknown')
+                page = metadata.get('page', '?')
+                chunk_type = metadata.get('chunk_type', 'text')
+                caption = metadata.get('caption') or ''
+                image_path = metadata.get('image_path') or ''
+
+                if chunk_type == 'image':
+                    entry = (
+                        f"\n[{i}] Source Image: {source} (Page {page})\n"
+                        f"Caption: {caption or 'N/A'}\n"
+                        f"Image Path: {image_path or 'N/A'}\n"
+                        f"Image Analysis: {content[:500]}..."
+                    )
+                else:
+                    entry = f"\n[{i}] Source Text: {source} (Page {page})\n{content[:500]}..."
+
                 if length + len(entry) > max_length:
                     break
                 parts.append(entry)
@@ -198,11 +274,14 @@ Answer:""",
                     
                     sources = []
                     for doc in result.get('source_documents', []):
+                        source_type = doc.metadata.get('chunk_type', 'text')
                         sources.append({
-                            'type': 'text',
+                            'type': source_type,
                             'file': doc.metadata.get('file_name'),
                             'page': doc.metadata.get('page'),
-                            'content': doc.page_content[:200]
+                            'content': doc.page_content[:200],
+                            'caption': doc.metadata.get('caption'),
+                            'image_path': doc.metadata.get('image_path'),
                         })
                     
                     return {
@@ -238,12 +317,19 @@ Answer:""",
         
         # Prepare sources
         sources = []
+        image_results_count = 0
         for r in retrieval_result['text_results']:
+            metadata = r.get('metadata', {}) or {}
+            source_type = metadata.get('chunk_type', 'text')
+            if source_type == 'image':
+                image_results_count += 1
             sources.append({
-                'type': 'text',
-                'file': r.get('metadata', {}).get('file_name'),
-                'page': r.get('metadata', {}).get('page'),
-                'score': r.get('score')
+                'type': source_type,
+                'file': metadata.get('file_name'),
+                'page': metadata.get('page'),
+                'score': r.get('score'),
+                'caption': metadata.get('caption'),
+                'image_path': metadata.get('image_path'),
             })
         
         return {
@@ -253,8 +339,8 @@ Answer:""",
             'context': retrieval_result['context'],
             'sources': sources,
             'text_results_count': len(retrieval_result['text_results']),
-            'image_results_count': 0,
-            'chain': 'Text RAG'
+            'image_results_count': image_results_count,
+            'chain': 'Multimodal Text/Image RAG'
         }
     
     def get_status(self) -> Dict:

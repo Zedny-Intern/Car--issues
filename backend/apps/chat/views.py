@@ -1,10 +1,17 @@
 """
 Views for Chat API.
 """
+import os
+import tempfile
+from pathlib import Path
+
 from rest_framework import viewsets, status
 from rest_framework.decorators import action
 from rest_framework.response import Response
-from rest_framework.permissions import AllowAny
+from rest_framework.parsers import MultiPartParser, FormParser, JSONParser
+from rest_framework.permissions import AllowAny, IsAuthenticated
+from django.conf import settings
+from django.db import transaction
 from django.utils import timezone
 from .models import ChatSession, ChatMessage
 from .serializers import (
@@ -34,8 +41,17 @@ class ChatSessionViewSet(viewsets.ModelViewSet):
         'complaint__car',
         'complaint__car__customer'
     ).prefetch_related('messages').all()
-    permission_classes = [AllowAny]  # Change to IsAuthenticated in production
+    permission_classes = [AllowAny] if settings.DEBUG else [IsAuthenticated]
+    public_actions = {'list', 'retrieve', 'create', 'send_message', 'close', 'reopen', 'history'}
     ordering = ['-updated_at']
+
+    def get_permissions(self):
+        if settings.DEBUG or (
+            getattr(settings, 'PUBLIC_FRONTEND_API_ENABLED', True)
+            and self.action in self.public_actions
+        ):
+            return [AllowAny()]
+        return [permission() for permission in self.permission_classes]
 
     def get_serializer_class(self):
         """Return appropriate serializer based on action."""
@@ -82,33 +98,30 @@ class ChatSessionViewSet(viewsets.ModelViewSet):
         serializer = self.get_serializer(data=request.data)
         serializer.is_valid(raise_exception=True)
         self.perform_create(serializer)
-        
-        # Re-serialize to ensure the new greeting message is included in the response
-        instance = serializer.instance
-        # Fetch fresh from DB to ensure relations are updated
-        from .models import ChatSession
-        instance = ChatSession.objects.get(id=instance.id)
-            
-        new_serializer = self.get_serializer(instance)
-        data = new_serializer.data
-        
-        # Manually inject messages if missing (DRF issue workaround)
-        if not data.get('messages'):
-            from .serializers import ChatMessageSerializer
-            messages_serializer = ChatMessageSerializer(instance.messages.all(), many=True)
-            data['messages'] = messages_serializer.data
-            
-        headers = self.get_success_headers(data)
-        return Response(data, status=status.HTTP_201_CREATED, headers=headers)
 
-    @action(detail=True, methods=['post'])
+        # Always return the full session payload (including initial greeting message).
+        instance = ChatSession.objects.select_related(
+            'complaint',
+            'complaint__car',
+            'complaint__car__customer'
+        ).prefetch_related('messages').get(id=serializer.instance.id)
+        response_data = ChatSessionSerializer(instance).data
+
+        headers = self.get_success_headers(response_data)
+        return Response(response_data, status=status.HTTP_201_CREATED, headers=headers)
+
+    @action(
+        detail=True,
+        methods=['post'],
+        parser_classes=[JSONParser, MultiPartParser, FormParser]
+    )
     def send_message(self, request, pk=None):
         """
         Send a message in the chat and get AI response.
-        Text only.
+        Supports optional image uploads.
 
         Required:
-        - message: The user's message text
+        - message or image(s)
         
         Returns:
         - Streaming AI response (text/plain)
@@ -121,15 +134,65 @@ class ChatSessionViewSet(viewsets.ModelViewSet):
                 status=status.HTTP_400_BAD_REQUEST
             )
 
-        # Extract message
+        # Extract text and optional images.
         message_text = request.data.get('message', '').strip()
-        
-        # Validate: must have message
-        if not message_text:
+        uploaded_images = list(request.FILES.getlist('images'))
+        single_image = request.FILES.get('image')
+        if single_image:
+            uploaded_images.append(single_image)
+
+        # Validate: need text or at least one image.
+        if not message_text and not uploaded_images:
             return Response(
-                {'error': 'Message text is required'},
+                {'error': 'Message text or image is required'},
                 status=status.HTTP_400_BAD_REQUEST
             )
+
+        # If only image was sent, create a default prompt.
+        if not message_text and uploaded_images:
+            message_text = "Please analyze the uploaded image(s) and explain the issue."
+
+        # Validate/prepare temporary image files.
+        allowed_types = {
+            'image/jpeg',
+            'image/jpg',
+            'image/png',
+            'image/webp',
+            'image/gif',
+            'image/bmp',
+        }
+        max_image_size_bytes = 8 * 1024 * 1024
+        temp_image_paths = []
+        image_names = []
+
+        def cleanup_temp_images():
+            for path in temp_image_paths:
+                try:
+                    os.remove(path)
+                except OSError:
+                    pass
+
+        for image in uploaded_images:
+            content_type = (image.content_type or '').lower()
+            if content_type and content_type not in allowed_types:
+                cleanup_temp_images()
+                return Response(
+                    {'error': f'Unsupported image content type: {content_type}'},
+                    status=status.HTTP_400_BAD_REQUEST
+                )
+            if image.size > max_image_size_bytes:
+                cleanup_temp_images()
+                return Response(
+                    {'error': f'Image exceeds maximum size of {max_image_size_bytes // (1024 * 1024)}MB'},
+                    status=status.HTTP_400_BAD_REQUEST
+                )
+
+            suffix = Path(image.name).suffix or '.img'
+            with tempfile.NamedTemporaryFile(delete=False, suffix=suffix) as tmp_file:
+                for chunk in image.chunks():
+                    tmp_file.write(chunk)
+                temp_image_paths.append(tmp_file.name)
+                image_names.append(Path(image.name).name)
         
         # Create user message
         message_data = {
@@ -140,6 +203,12 @@ class ChatSessionViewSet(viewsets.ModelViewSet):
         serializer = ChatMessageCreateSerializer(data=message_data)
         if serializer.is_valid():
             user_message = serializer.save()
+            if image_names:
+                user_message.metadata = {
+                    'image_names': image_names,
+                    'image_count': len(image_names),
+                }
+                user_message.save(update_fields=['metadata'])
 
             # Prepare for streaming
             from django.http import StreamingHttpResponse
@@ -151,15 +220,18 @@ class ChatSessionViewSet(viewsets.ModelViewSet):
                 
                 # Regular text-only chat
                 service = get_mechanic_service()
-                
-                # Stream chunks
-                for chunk in service.stream_response(
-                    user_message=user_message.message,
-                    chat_session=session,
-                    use_conversation_memory=True
-                ):
-                    full_response += chunk
-                    yield chunk
+                try:
+                    # Stream chunks
+                    for chunk in service.stream_response(
+                        user_message=user_message.message,
+                        chat_session=session,
+                        use_conversation_memory=True,
+                        image_paths=temp_image_paths
+                    ):
+                        full_response += chunk
+                        yield chunk
+                finally:
+                    cleanup_temp_images()
 
                 # Save the full response to DB after streaming completes
                 ChatMessage.objects.create(
@@ -175,6 +247,7 @@ class ChatSessionViewSet(viewsets.ModelViewSet):
             response['X-Accel-Buffering'] = 'no'  # Disable Nginx buffering
             return response
 
+        cleanup_temp_images()
         return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
 
     @action(detail=True, methods=['post'])
@@ -213,9 +286,18 @@ class ChatSessionViewSet(viewsets.ModelViewSet):
                 status=status.HTTP_400_BAD_REQUEST
             )
 
-        session.is_active = True
-        session.closed_at = None
-        session.save()
+        with transaction.atomic():
+            session = ChatSession.objects.select_for_update().get(pk=session.pk)
+            ChatSession.objects.select_for_update().filter(
+                complaint=session.complaint,
+                is_active=True,
+            ).exclude(pk=session.pk).update(
+                is_active=False,
+                closed_at=timezone.now(),
+            )
+            session.is_active = True
+            session.closed_at = None
+            session.save()
 
         return Response({
             'success': True,
@@ -250,7 +332,7 @@ class ChatMessageViewSet(viewsets.ReadOnlyModelViewSet):
     """
     queryset = ChatMessage.objects.select_related('session').all()
     serializer_class = ChatMessageSerializer
-    permission_classes = [AllowAny]  # Change to IsAuthenticated in production
+    permission_classes = [AllowAny] if settings.DEBUG else [IsAuthenticated]
     ordering = ['created_at']
 
     def get_queryset(self):
